@@ -65,6 +65,11 @@ dependencies = [
     "opencv-python-headless>=4.9.0,<4.14.0",
     "Pillow>=10.0.0,<13.0.0",
     "einops>=0.8.0,<0.9.0",
+    # NOTE (migração 0.4.4 -> 0.6.1): o fork adicionava aqui opencv-python-headless, av,
+    # jsonlines, packaging, pynput, pyserial e wandb. Na 0.6.1 todos continuam existindo,
+    # só que fora do core: opencv/packaging seguem no core acima; av -> [av-dep];
+    # jsonlines -> [dataset]; pynput/pyserial -> [hardware]; wandb -> [training].
+    # Instale [core_scripts] (= dataset + hardware + viz) para ter o conjunto equivalente.
 
     # Config & Hub
     "draccus>=0.11.6,<0.12.0",
@@ -192,7 +197,19 @@ unitree_g1 = [
 # NOTA: o SDK Unitree em si NÃO entra aqui — o upstream mantém "unitree-sdk2==1.0.1"
 # comentado no extra unitree_g1 porque a instalação é via git:
 #   pip install git+https://github.com/unitreerobotics/unitree_sdk2_python.git
+#
+# HISTÓRICO: o fork declarava aqui `unitree-sdk2py; python_version < '3.12'`, com a nota
+# "unitree-sdk2py not available for Python 3.12+". Isso deixou de ser um problema porque
+# nunca usamos o pacote do PyPI — o SDK vem do git (repo unitree_sdk2_python), que compila
+# em 3.12. Por isso o dex3 não declara o SDK como dependência.
 unitree_g1_dex3 = ["lerobot[unitree_g1]"]
+# Teleop VR do G1: IK dos braços (pinocchio + casadi) e retargeting das mãos.
+# Usado por robots/unitree_g1/robot_control/{g1_arm_ik,hand_retargeting}.py
+unitree_g1_vr_teleop = [
+    "pin>=3.3.0",
+    "casadi>=3.6.0",
+    "dex-retargeting>=0.1.0",
+]
 # ATENÇÃO: este extra NÃO instala o pacote `televuer` — ele só puxa o vuer.
 # O televuer é NOSSO FORK e entra editable, à parte:
 #   pip install -e ./lerobot-ext/teleop/televuer
@@ -588,3 +605,9 @@ ignore_errors = false
 # [[tool.mypy.overrides]]
 # module = "lerobot.scripts.*"
 # ignore_errors = false
+# NOTA (migração 0.4.4 -> 0.6.1): aqui existia um bloco [tool.uv] com `conflicts`
+# declarando wallx x transformers-dep/pi/etc e unitree_g1_dex3 x all. Era necessário
+# porque na 0.4.4 o wallx pedia transformers==4.49.0 e o pi usava um branch git custom
+# do transformers. Na 0.6.1 os dois passaram a usar `lerobot[transformers-dep]`
+# (>=5.4.0,<5.6.0), e o dex3 não depende mais de unitree-sdk2py — os conflitos
+# deixaram de existir, então o bloco foi removido em vez de reaplicado.
