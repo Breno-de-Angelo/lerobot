@@ -193,16 +193,22 @@ unitree_g1 = [
     "lerobot[pygame-dep]",
 ]
 # G1 com as mãos Dex3. Herda o extra unitree_g1 do upstream (pyzmq, onnx, meshcat,
-# matplotlib, pygame) e acrescenta só o que o Dex3 precisa.
-# NOTA: o SDK Unitree em si NÃO entra aqui — o upstream mantém "unitree-sdk2==1.0.1"
-# comentado no extra unitree_g1 porque a instalação é via git:
-#   pip install git+https://github.com/unitreerobotics/unitree_sdk2_python.git
+# matplotlib, pygame) e acrescenta o IK/retargeting do teleop VR.
 #
-# HISTÓRICO: o fork declarava aqui `unitree-sdk2py; python_version < '3.12'`, com a nota
-# "unitree-sdk2py not available for Python 3.12+". Isso deixou de ser um problema porque
-# nunca usamos o pacote do PyPI — o SDK vem do git (repo unitree_sdk2_python), que compila
-# em 3.12. Por isso o dex3 não declara o SDK como dependência.
-unitree_g1_dex3 = ["lerobot[unitree_g1]"]
+# O SDK Unitree NÃO entra aqui. O fork declarava
+#   "unitree-sdk2py @ git+...; python_version < '3.12'"  +  "cyclonedds==0.10.2; <3.12"
+# com marcadores que nunca ativam em Python 3.12 — ou seja, em 3.12 esse extra já não
+# instalava o SDK de qualquer forma. O upstream chegou à mesma conclusão e mantém
+# "unitree-sdk2==1.0.1" comentado no extra unitree_g1. A instalação é manual:
+#   pip install git+https://github.com/unitreerobotics/unitree_sdk2_python.git
+# (o cyclonedds é resolvido pelo próprio setup.py do SDK).
+#
+# Também removido daqui o "opencv-python" que o fork listava: o core do lerobot já
+# depende de opencv-python-headless, e os dois pacotes instalam o mesmo módulo cv2.
+unitree_g1_dex3 = [
+    "lerobot[unitree_g1]",            # base G1
+    "lerobot[unitree_g1_vr_teleop]",  # IK + hand retargeting
+]
 # Teleop VR do G1: IK dos braços (pinocchio + casadi) e retargeting das mãos.
 # Usado por robots/unitree_g1/robot_control/{g1_arm_ik,hand_retargeting}.py
 unitree_g1_vr_teleop = [
@@ -216,7 +222,11 @@ unitree_g1_vr_teleop = [
 # vuer pinado em 0.0.60 porque o televuer importa WebRTCVideoPlane/WebRTCStereoVideoPlane
 # de vuer.schemas (API dessa versão). params-proto com teto porque o vuer 0.0.60 declara
 # ">=2.13.0" sem limite, e o 3.x removeu `Flag`, que vuer/server.py importa.
-televuer = ["vuer[all]==0.0.60", "params-proto>=2.13.0,<3.0.0"]
+televuer = [
+    "vuer[all]==0.0.60",
+    "params-proto>=2.13.0,<3.0.0",
+    "aiortc>=1.6.0",  # WebRTC (streaming de vídeo para o headset)
+]
 # reachy2-sdk caps grpcio<=1.73.1 and protobuf<=6.32.0; quarantined here so downstream users aren't held back. reachy2-sdk is unlikely to release new versions.
 reachy2 = [
     "reachy2_sdk>=1.0.15,<1.1.0",
