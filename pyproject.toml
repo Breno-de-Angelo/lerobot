@@ -212,8 +212,6 @@ unitree_g1_dex3 = [
 # Teleop VR do G1: IK dos braços (pinocchio + casadi) e retargeting das mãos.
 # Usado por robots/unitree_g1/robot_control/{g1_arm_ik,hand_retargeting}.py
 unitree_g1_vr_teleop = [
-    "pin>=3.3.0",
-    "casadi>=3.6.0",
     "dex-retargeting>=0.1.0",
 ]
 # ATENÇÃO: este extra NÃO instala o pacote `televuer` — ele só puxa o vuer.
