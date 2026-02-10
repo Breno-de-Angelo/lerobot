@@ -109,6 +109,29 @@ class ImageServer:
 
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="ZMQ Image Server")
+    parser.add_argument("--device", type=int, default=4, help="Camera device index (e.g. 0 for /dev/video0)")
+    parser.add_argument("--width", type=int, default=640, help="Camera width")
+    parser.add_argument("--height", type=int, default=480, help="Camera height")
+    parser.add_argument("--fps", type=int, default=30, help="Camera FPS")
+    parser.add_argument("--port", type=int, default=5555, help="ZMQ port to bind to")
+    parser.add_argument("--camera_name", type=str, default="head_camera", help="Camera name key in the message")
+    
+    args = parser.parse_args()
+
     logging.basicConfig(level=logging.INFO)
-    config = {"fps": 30, "cameras": {"head_camera": {"device_id": 4, "shape": [480, 640]}}}
-    ImageServer(config, port=5555).run()
+    
+    config = {
+        "fps": args.fps,
+        "cameras": {
+            args.camera_name: {
+                "device_id": args.device,
+                "shape": [args.height, args.width]
+            }
+        }
+    }
+    
+    logger.info(f"Starting ZMQ Image Server on port {args.port} for camera {args.device} ({args.width}x{args.height} @ {args.fps}fps)")
+    ImageServer(config, port=args.port).run()
