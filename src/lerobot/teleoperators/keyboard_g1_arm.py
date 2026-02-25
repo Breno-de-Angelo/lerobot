@@ -1,5 +1,4 @@
 import logging
-import numpy as np
 import pygame
 from dataclasses import dataclass
 from typing import Any
@@ -10,23 +9,21 @@ from lerobot.processor import RobotAction
 
 logger = logging.getLogger(__name__)
 
-@TeleoperatorConfig.register_subclass("joystick_g1_arms")
+@TeleoperatorConfig.register_subclass("keyboard_g1_arms")
 @dataclass
-class JoyConfig(TeleoperatorConfig):
-    joystick_id: int = 0
-    speed: float = 0.02  # Sensibilidade (reduzida um pouco para mais precisão)
-    deadzone: float = 0.1
+class KeyboardConfig(TeleoperatorConfig):
+    speed: float = 0.02  # Sensibilidade
     fps: int = 60
 
-class JoyTeleoperator(Teleoperator):
-    config_class = JoyConfig
-    name = "joystick_g1_arms" 
+class KeyboardTeleoperator(Teleoperator):
+    config_class = KeyboardConfig
+    name = "keyboard_g1_arms" 
 
-    def __init__(self, config: JoyConfig):
+    def __init__(self, config: KeyboardConfig):
         super().__init__(config)
         self.config = config
         self._is_connected = False
-        self.joystick = None
+        self.screen = None
         
         from lerobot.robots.unitree_g1.g1_utils import G1_29_JointIndex, LEFT_HAND_JOINT_NAMES, RIGHT_HAND_JOINT_NAMES
         
@@ -42,20 +39,17 @@ class JoyTeleoperator(Teleoperator):
             return
 
         pygame.init()
-        pygame.joystick.init()
-
-        if pygame.joystick.get_count() == 0:
-            raise ConnectionError("Nenhum joystick foi detectado.")
-
-        self.joystick = pygame.joystick.Joystick(self.config.joystick_id)
-        self.joystick.init()
-        logger.info(f"Joystick conectado: {self.joystick.get_name()}")
+        
+        # O Pygame precisa de uma janela (display) para capturar inputs do teclado.
+        # Criamos uma janela pequena e damos um nome a ela.
+        self.screen = pygame.display.set_mode((400, 300))
+        pygame.display.set_caption("Controle G1 Arm - Mantenha o foco aqui")
+        
+        logger.info("Controle por teclado ativado. Mantenha a janela do Pygame em foco.")
         self._is_connected = True
 
     def disconnect(self) -> None:
         if self._is_connected:
-            if self.joystick:
-                self.joystick.quit()
             pygame.quit()
             self._is_connected = False
 
@@ -89,46 +83,50 @@ class JoyTeleoperator(Teleoperator):
     def send_feedback(self, feedback: dict[str, Any]) -> None:
         pass
 
-    def _apply_deadzone(self, value: float) -> float:
-        if abs(value) < self.config.deadzone:
-            return 0.0
-        return value
-
     def get_action(self) -> RobotAction:
         if not self._is_connected:
-             raise ConnectionError("Teleoperador Joystick não está conectado.")
+             raise ConnectionError("Teleoperador por Teclado não está conectado.")
         
         pygame.event.pump()
+        keys = pygame.key.get_pressed()
 
-        # LEITURA DOS ANALÓGICOS (Eixos)
-        ls_x = self._apply_deadzone(self.joystick.get_axis(0))
-        ls_y = self._apply_deadzone(self.joystick.get_axis(1))
-        rs_x = self._apply_deadzone(self.joystick.get_axis(3))
-        rs_y = self._apply_deadzone(self.joystick.get_axis(4))
+        # ================= MAPEAMENTO DO BRAÇO ESQUERDO =================
+        # Analógico Esquerdo (W/A/S/D)
+        ls_x = keys[pygame.K_d] - keys[pygame.K_a]
+        ls_y = keys[pygame.K_s] - keys[pygame.K_w]
         
-        # LEITURA DOS GATILHOS (No Xbox, costumam ser eixos 2 e 5. Vão de -1 a 1)
-        lt = self.joystick.get_axis(2) if self.joystick.get_numaxes() > 2 else -1.0
-        rt = self.joystick.get_axis(5) if self.joystick.get_numaxes() > 5 else -1.0
+        # D-Pad (Cotovelo: R/F | Rotação: Q/E)
+        dpad_x = keys[pygame.K_e] - keys[pygame.K_q]
+        dpad_y = keys[pygame.K_r] - keys[pygame.K_f]
+        
+        # Modificador de Pulso Esquerdo (LSHIFT)
+        lb = keys[pygame.K_LSHIFT]
+        
+        # Gatilho Mão Esquerda (Z)
+        left_hand_close = keys[pygame.K_z]
 
-        # LEITURA DOS BOTÕES LB E RB (Para trocar o modo dos analógicos para o Pulso)
-        lb = self.joystick.get_button(4)
-        rb = self.joystick.get_button(5)
 
-        # LEITURA DO D-PAD (Setinhas) para o Cotovelo e Rotação do braço Esquerdo
-        hat = self.joystick.get_hat(0) if self.joystick.get_numhats() > 0 else (0, 0)
-        dpad_x, dpad_y = hat  # dpad_y: 1 é cima, -1 é baixo. dpad_x: 1 é dir, -1 é esq.
-
-        # LEITURA DOS BOTÕES ABXY para o Cotovelo e Rotação do braço Direito
-        # Padrão Xbox Pygame: A=0, B=1, X=2, Y=3
-        btn_a = self.joystick.get_button(0)
-        btn_b = self.joystick.get_button(1)
-        btn_x = self.joystick.get_button(2)
-        btn_y = self.joystick.get_button(3)
+        # ================= MAPEAMENTO DO BRAÇO DIREITO =================
+        # Analógico Direito (I/J/K/L)
+        rs_x = keys[pygame.K_l] - keys[pygame.K_j]
+        rs_y = keys[pygame.K_k] - keys[pygame.K_i]
+        
+        # Botões Y/A/X/B (Cotovelo: U/J | Rotação: O/H -> Adaptado para Y/H e O/U)
+        btn_y = keys[pygame.K_y] # Cotovelo -
+        btn_a = keys[pygame.K_h] # Cotovelo +
+        btn_x = keys[pygame.K_u] # Rotação -
+        btn_b = keys[pygame.K_o] # Rotação +
+        
+        # Modificador de Pulso Direito (RSHIFT)
+        rb = keys[pygame.K_RSHIFT]
+        
+        # Gatilho Mão Direita (M)
+        right_hand_close = keys[pygame.K_m]
 
 
         # ================= CONTROLE DO BRAÇO ESQUERDO =================
         if lb:
-            # Se LB está pressionado, o analógico controla o Pulso
+            # Se LSHIFT está pressionado, W/A/S/D controla o Pulso
             self.body_joints["kLeftWristPitch.q"] += ls_y * self.config.speed
             self.body_joints["kLeftWristRoll.q"]  += ls_x * self.config.speed
         else:
@@ -136,14 +134,14 @@ class JoyTeleoperator(Teleoperator):
             self.body_joints["kLeftShoulderPitch.q"] += ls_y * self.config.speed
             self.body_joints["kLeftShoulderRoll.q"]  += ls_x * self.config.speed
         
-        # D-Pad controla o Cotovelo e Rotação (Yaw)
+        # Cotovelo e Rotação (Yaw)
         self.body_joints["kLeftElbow.q"]       += dpad_y * self.config.speed
         self.body_joints["kLeftShoulderYaw.q"] += dpad_x * self.config.speed
 
 
         # ================= CONTROLE DO BRAÇO DIREITO =================
         if rb:
-            # Se RB está pressionado, o analógico controla o Pulso
+            # Se RSHIFT está pressionado, I/J/K/L controla o Pulso
             self.body_joints["kRightWristPitch.q"] += rs_y * self.config.speed
             self.body_joints["kRightWristRoll.q"]  += rs_x * self.config.speed
         else:
@@ -151,7 +149,7 @@ class JoyTeleoperator(Teleoperator):
             self.body_joints["kRightShoulderPitch.q"] += rs_y * self.config.speed
             self.body_joints["kRightShoulderRoll.q"]  += rs_x * self.config.speed
         
-        # Botões Y/A controlam Cotovelo, X/B controlam Rotação (Yaw)
+        # Cotovelo e Rotação (Yaw) Direito
         if btn_y: self.body_joints["kRightElbow.q"] -= self.config.speed
         if btn_a: self.body_joints["kRightElbow.q"] += self.config.speed
         if btn_x: self.body_joints["kRightShoulderYaw.q"] -= self.config.speed
@@ -159,15 +157,30 @@ class JoyTeleoperator(Teleoperator):
 
 
         # ================= CONTROLE DAS MÃOS (Dex3) =================
-        # Gatilhos vão de -1.0 (solto) a 1.0 (apertado). Se passar de 0.0, fecha a mão.
-        left_hand_val = 1.0 if lt > 0.0 else 0.0
-        right_hand_val = 1.0 if rt > 0.0 else 0.0
+        hand_speed = self.config.speed * 2  # Mãos podem fechar um pouco mais rápido
+        max_hand_val = 1.0  # Mude para 100.0 ou 1.57 se a junta exigir outra escala
         
+        # Lógica para Mão Esquerda
         for name in self._left_hand_names:
-            self.hand_joints[f"{name}.q"] = left_hand_val
+            key = f"{name}.q"
+            if left_hand_close:
+                self.hand_joints[key] = min(self.hand_joints[key] + hand_speed, max_hand_val)
+            else:
+                self.hand_joints[key] = max(self.hand_joints[key] - hand_speed, 0.0)
+                
+        # Lógica para Mão Direita
         for name in self._right_hand_names:
-            self.hand_joints[f"{name}.q"] = right_hand_val
+            key = f"{name}.q"
+            if right_hand_close:
+                self.hand_joints[key] = min(self.hand_joints[key] + hand_speed, max_hand_val)
+            else:
+                self.hand_joints[key] = max(self.hand_joints[key] - hand_speed, 0.0)
 
         # Concatena e envia
         action_data = {**self.body_joints, **self.hand_joints}
+        
+        # OPCIONAL: Se o seu processador exigir chaves de trigger/pinch ao invés de juntas diretas
+        # action_data["left_pinch_value"] = self.hand_joints[f"{self._left_hand_names[0]}.q"] * 100.0
+        # action_data["right_pinch_value"] = self.hand_joints[f"{self._right_hand_names[0]}.q"] * 100.0
+        
         return action_data

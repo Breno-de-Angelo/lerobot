@@ -17,4 +17,4 @@
 from .config import TeleoperatorConfig
 from .teleoperator import Teleoperator
 from .utils import TeleopEvents, make_teleoperator_from_config
-from . import televuer, joy_teleoperator
+from . import televuer, joy_teleoperator, keyboard_g1_arm

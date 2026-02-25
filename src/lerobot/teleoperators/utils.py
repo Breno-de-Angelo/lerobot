@@ -85,10 +85,14 @@ def make_teleoperator_from_config(config: TeleoperatorConfig) -> Teleoperator:
         from .televuer import TeleVuerTeleoperator
 
         return TeleVuerTeleoperator(config)
-    elif config.type == "joystick_g1_Arms":
+    elif config.type == "joystick_g1_arms":
         from .joy_teleoperator import JoyTeleoperator
 
         return JoyTeleoperator(config)
+    elif config.type == "keyboard_g1_arms":
+        from .keyboard_g1_arm import KeyboardTeleoperator
+
+        return KeyboardTeleoperator(config)
     else:
         try:
             return cast(Teleoperator, make_device_from_device_class(config))
