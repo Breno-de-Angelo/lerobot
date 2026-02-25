@@ -85,7 +85,7 @@ def make_teleoperator_from_config(config: TeleoperatorConfig) -> Teleoperator:
         from .televuer import TeleVuerTeleoperator
 
         return TeleVuerTeleoperator(config)
-    elif config.type == "joystick":
+    elif config.type == "joystick_g1_Arms":
         from .joy_teleoperator import JoyTeleoperator
 
         return JoyTeleoperator(config)

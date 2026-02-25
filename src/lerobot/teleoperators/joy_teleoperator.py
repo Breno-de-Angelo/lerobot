@@ -10,7 +10,7 @@ from lerobot.processor import RobotAction
 
 logger = logging.getLogger(__name__)
 
-@TeleoperatorConfig.register_subclass("joystick")
+@TeleoperatorConfig.register_subclass("joystick_g1_Arms")
 @dataclass
 class JoyConfig(TeleoperatorConfig):
     joystick_id: int = 0
@@ -20,7 +20,7 @@ class JoyConfig(TeleoperatorConfig):
 
 class JoyTeleoperator(Teleoperator):
     config_class = JoyConfig
-    name = "televuer" 
+    name = "joystick_g1_Arms" 
 
     def __init__(self, config: JoyConfig):
         super().__init__(config)
