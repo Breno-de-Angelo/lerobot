@@ -343,6 +343,12 @@ class PaliGemmaWithExpertModel(
         if use_adarms is None:
             use_adarms = [False, False]
         super().__init__()
+        if not _transformers_available or CONFIG_MAPPING is None:
+            raise ImportError(
+                "PI05 requires the optional Transformers dependency stack. "
+                "Install the project with the PI extra, e.g. "
+                "`pip install -e ./lerobot[pi]` or rerun the project installer."
+            )
         self.freeze_vision_encoder = freeze_vision_encoder
         self.train_expert_only = train_expert_only
 

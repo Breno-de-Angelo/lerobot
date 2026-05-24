@@ -57,6 +57,7 @@ class PI05Config(PreTrainedConfig):
         DEFAULT_IMAGE_SIZE,
         DEFAULT_IMAGE_SIZE,
     )  # see openpi `preprocessing_pytorch.py`
+    tokenizer_name: str = "google/paligemma-3b-pt-224"
 
     # Add empty images. Used to add empty cameras when no image features are present.
     empty_cameras: int = 0

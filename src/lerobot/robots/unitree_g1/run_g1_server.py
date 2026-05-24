@@ -103,9 +103,21 @@ def handstate_to_dict(msg: HandState_, side: str) -> dict[str, Any]:
                 "tau_est": float(msg.motor_state[i].tau_est),
             }
         )
+
+    press_sensors = []
+    if hasattr(msg, "press_sensor_state"):
+        for p in msg.press_sensor_state:
+            press_sensors.append(
+                {
+                    "pressure": [float(x) for x in p.pressure],
+                    "temperature": [float(x) for x in p.temperature],
+                }
+            )
+
     return {
         "side": side,
         "motor_state": motor_states,
+        "press_sensor_state": press_sensors,
     }
 
 

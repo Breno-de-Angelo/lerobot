@@ -139,6 +139,9 @@ class HandStateMsg:
         """Initialize from deserialized JSON data."""
         self.side: str = data.get("side", "")
         self.motor_state = [MotorState(m) for m in data.get("motor_state", [])]
+        # Dex3 tactile pressure — list of per-sensor dicts {"pressure": [12 floats], "temperature": [12 floats]}.
+        # Empty list if the bridge isn't forwarding pressure or the hand has no tactile sensors.
+        self.press_sensor_state: list[dict[str, Any]] = list(data.get("press_sensor_state", []))
 
 
 # ==============================================================================

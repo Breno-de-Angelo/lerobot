@@ -64,7 +64,7 @@ class UnitreeG1Config(RobotConfig):
     is_simulation: bool = True
 
     # Socket config for ZMQ bridge
-    robot_ip: str = "192.168.123.164"  # default G1 IP
-
+    # robot_ip: str = "192.168.123.164"  # default G1 IP
+    robot_ip: str = "10.9.8.73"
     # Cameras (ZMQ-based remote cameras)
     cameras: dict[str, CameraConfig] = field(default_factory=dict)

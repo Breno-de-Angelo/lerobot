@@ -36,6 +36,21 @@ from lerobot.processor import RobotAction, RobotObservation
 logger = logging.getLogger(__name__)
 
 
+def _flatten_pressure_to_33(press_sensor_state: list) -> np.ndarray:
+    """Flatten Dex3 tactile sensors into a 33-dim float32 vector.
+
+    Matches the data-collection convention (lerobot-ext/robot/unitree_g1/unitree_g1_dex3.py):
+    concatenate `pressure` across all sensors, pad with zeros if short, truncate to 33.
+    """
+    flat: list[float] = []
+    for sensor in press_sensor_state or []:
+        pressure = sensor.get("pressure", []) if isinstance(sensor, dict) else []
+        flat.extend(float(x) for x in pressure)
+    if len(flat) < 33:
+        flat.extend([0.0] * (33 - len(flat)))
+    return np.asarray(flat[:33], dtype=np.float32)
+
+
 @dataclass
 class HandMotorState:
     """State of a single hand motor."""
@@ -59,7 +74,11 @@ class UnitreeG1Dex3Config(UnitreeG1Config):
     hand_control_dt: float = 0.01  # 100 Hz control loop
     
     def __post_init__(self):
-        # Add default ZMQ camera if no cameras specified
+        # Add default ZMQ camera if no cameras specified.
+        # Keep the historic "cam_rgb_high" dict key for backwards compatibility with
+        # the ACT policy (trained dataset uses that exact observation name). Policies
+        # that need a different key (e.g. pi05's "head_camera") remap at the runtime
+        # layer instead of mutating the driver default.
         if not self.cameras and not self.is_simulation:
             from lerobot.cameras.zmq.configuration_zmq import ZMQCameraConfig
             self.cameras = {
@@ -67,10 +86,9 @@ class UnitreeG1Dex3Config(UnitreeG1Config):
                     server_address=self.robot_ip,
                     port=5555,
                     camera_name="head_camera",
-                    # Match the resolution expected by the policy
                     width=640,
                     height=480,
-                )
+                ),
             }
 
 
@@ -91,6 +109,12 @@ class UnitreeG1Dex3(UnitreeG1):
         # Hand state (similar to _lowstate for body)
         self._left_hand_state: HandState | None = None
         self._right_hand_state: HandState | None = None
+
+        # Tactile pressure (33-dim per hand). Matches the dataset encoding:
+        # flatten press_sensor_state[*].pressure across all sensors, pad/truncate to 33.
+        # See init_lerobot_record_v2.py + robot/unitree_g1/unitree_g1_dex3.py in lerobot-ext.
+        self._left_hand_pressure: np.ndarray = np.zeros(33, dtype=np.float32)
+        self._right_hand_pressure: np.ndarray = np.zeros(33, dtype=np.float32)
         
         # Threading control
         self._hand_shutdown_event = threading.Event()
@@ -125,7 +149,8 @@ class UnitreeG1Dex3(UnitreeG1):
                 for idx, joint_id in enumerate(Dex3_1_Left_JointIndex):
                     left_state.motor_state[idx].q = left_msg.motor_state[joint_id].q
                 self._left_hand_state = left_state
-            
+                self._left_hand_pressure = _flatten_pressure_to_33(left_msg.press_sensor_state)
+
             # Read right hand state
             right_msg = self._right_hand_state_sub.Read()
             if right_msg is not None:
@@ -133,6 +158,7 @@ class UnitreeG1Dex3(UnitreeG1):
                 for idx, joint_id in enumerate(Dex3_1_Right_JointIndex):
                     right_state.motor_state[idx].q = right_msg.motor_state[joint_id].q
                 self._right_hand_state = right_state
+                self._right_hand_pressure = _flatten_pressure_to_33(right_msg.press_sensor_state)
             
             # Maintain control rate
             elapsed = time.time() - start_time
@@ -215,18 +241,97 @@ class UnitreeG1Dex3(UnitreeG1):
         else:
             logger.warning("Dex3 Hands not fully connected - hand state unavailable.")
 
+    def reset_hands(self, default_positions: list[float] | None = None, duration_s: float = 2.0):
+        """Move both hands smoothly to a target pose (default: q=0, fully open).
+
+        Backport from lerobot-ext's data-collection driver. Used at the start of
+        inference to align the physical hand pose with the dataset's typical
+        initial state (q≈0) before the policy starts predicting — otherwise the
+        first chunk's command jumps from current state to ±1.5 in one frame and
+        the motor "espasms".
+
+        Args:
+            default_positions: 14-element list, [left_7, right_7]. If None, opens
+                both hands fully (q=0 each joint).
+            duration_s: total interpolation time (default 2 s, at hand_control_dt).
+        """
+        if default_positions is None:
+            default_left = np.zeros(Dex3_Num_Motors, dtype=np.float32)
+            default_right = np.zeros(Dex3_Num_Motors, dtype=np.float32)
+        else:
+            default_left = np.asarray(default_positions[:Dex3_Num_Motors], dtype=np.float32)
+            default_right = np.asarray(default_positions[Dex3_Num_Motors:], dtype=np.float32)
+
+        dt = self.config.hand_control_dt
+        steps = max(1, int(duration_s / dt))
+
+        # Snapshot current q (from subscribed state)
+        left_current = np.zeros(Dex3_Num_Motors, dtype=np.float32)
+        right_current = np.zeros(Dex3_Num_Motors, dtype=np.float32)
+        if self._left_hand_state is not None:
+            left_current = np.array([s.q for s in self._left_hand_state.motor_state], dtype=np.float32)
+        if self._right_hand_state is not None:
+            right_current = np.array([s.q for s in self._right_hand_state.motor_state], dtype=np.float32)
+
+        logger.info(f"reset_hands: interpolating L {left_current.round(2).tolist()} -> {default_left.round(2).tolist()} ({duration_s:.1f}s)")
+        for step in range(steps):
+            alpha = (step + 1) / steps  # 1/steps .. 1.0
+            left_q = left_current * (1 - alpha) + default_left * alpha
+            right_q = right_current * (1 - alpha) + default_right * alpha
+
+            action: dict[str, float] = {}
+            for i, name in enumerate(self.left_hand_joint_names):
+                action[f"{name}.q"] = float(left_q[i])
+            for i, name in enumerate(self.right_hand_joint_names):
+                action[f"{name}.q"] = float(right_q[i])
+            self.send_action(action)
+            time.sleep(dt)
+        logger.info("reset_hands: done")
+
     def disconnect(self):
-        """Disconnect from robot body and hands."""
-        # Signal hand thread to stop
+        """Disconnect from robot body and hands.
+
+        Before terminating the ZMQ link, put every hand motor into Limp Mode
+        (mode=0, kp=0, kd=0, tau=0) so the fingers go completely soft instead of
+        staying locked on the last command. Published 5x with 10ms gap so the
+        Dex3 board has a chance to receive even if a packet drops.
+        """
+        # 1. Limp Mode for hands so they release before we tear down ZMQ.
+        if (
+            self._left_hand_cmd_pub is not None
+            and self._right_hand_cmd_pub is not None
+            and self._left_hand_msg is not None
+            and self._right_hand_msg is not None
+        ):
+            try:
+                logger.info("disconnect: putting hands into Limp Mode (kp=kd=tau=0, mode=0)...")
+                for joint_id in Dex3_1_Left_JointIndex:
+                    self._left_hand_msg.motor_cmd[joint_id].mode = (joint_id & 0x0F) | (0x00 << 4)
+                    self._left_hand_msg.motor_cmd[joint_id].kp = 0.0
+                    self._left_hand_msg.motor_cmd[joint_id].kd = 0.0
+                    self._left_hand_msg.motor_cmd[joint_id].tau = 0.0
+                for joint_id in Dex3_1_Right_JointIndex:
+                    self._right_hand_msg.motor_cmd[joint_id].mode = (joint_id & 0x0F) | (0x00 << 4)
+                    self._right_hand_msg.motor_cmd[joint_id].kp = 0.0
+                    self._right_hand_msg.motor_cmd[joint_id].kd = 0.0
+                    self._right_hand_msg.motor_cmd[joint_id].tau = 0.0
+                for _ in range(5):
+                    self._left_hand_cmd_pub.Write(self._left_hand_msg)
+                    self._right_hand_cmd_pub.Write(self._right_hand_msg)
+                    time.sleep(0.01)
+            except Exception as e:
+                logger.warning(f"disconnect: Limp Mode write raised: {e}")
+
+        # 2. Signal hand thread to stop
         self._hand_shutdown_event.set()
-        
+
         # Wait for hand thread to finish
         if self._hand_subscribe_thread is not None:
             self._hand_subscribe_thread.join(timeout=2.0)
             if self._hand_subscribe_thread.is_alive():
                 logger.warning("Hand subscribe thread did not stop cleanly")
-        
-        # Disconnect body
+
+        # 3. Disconnect body
         super().disconnect()
 
     @cached_property
@@ -245,36 +350,43 @@ class UnitreeG1Dex3(UnitreeG1):
 
     @cached_property
     def observation_features(self) -> dict[str, type | tuple]:
-        """Define observation space: body joints (based on control_mode) + hand joints.
-        
-        - full_body mode: 29 body + 14 hand = 43 joints
-        - upper_body mode: 14 arm + 14 hand = 28 joints
+        """Define observation space: body joints + hand joints + tactile pressure.
+
+        - full_body mode: 29 body + 14 hand + 66 pressure
+        - upper_body mode: 14 arm + 14 hand + 66 pressure
         """
         features = super().observation_features
         for name in self.left_hand_joint_names:
             features[f"{name}.q"] = float
         for name in self.right_hand_joint_names:
             features[f"{name}.q"] = float
+        features["left_hand_pressure"] = (33,)
+        features["right_hand_pressure"] = (33,)
         return features
 
     def get_observation(self) -> RobotObservation:
-        """Get observation including hand joint positions."""
+        """Get observation including hand joint positions and tactile pressure."""
         obs = super().get_observation()
-        
+
         # Add left hand state (default to 0.0 if hands not connected)
         for i, name in enumerate(self.left_hand_joint_names):
             if self._left_hand_state is not None:
                 obs[f"{name}.q"] = float(self._left_hand_state.motor_state[i].q)
             else:
                 obs[f"{name}.q"] = 0.0  # Default when hands not available
-        
+
         # Add right hand state (default to 0.0 if hands not connected)
         for i, name in enumerate(self.right_hand_joint_names):
             if self._right_hand_state is not None:
                 obs[f"{name}.q"] = float(self._right_hand_state.motor_state[i].q)
             else:
                 obs[f"{name}.q"] = 0.0  # Default when hands not available
-        
+
+        # Tactile pressure per hand (33-dim float32). Consumers that don't need it
+        # can ignore these keys; the trained pi05-D injector pulls them by name.
+        obs["left_hand_pressure"] = self._left_hand_pressure.copy()
+        obs["right_hand_pressure"] = self._right_hand_pressure.copy()
+
         return obs
 
     def send_action(self, action: RobotAction) -> RobotAction:
