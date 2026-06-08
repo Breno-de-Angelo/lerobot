@@ -16,7 +16,7 @@
 
 """
 ZMQCamera - Captures frames from remote cameras via ZeroMQ using JSON protocol in the
-following format:
+following legacy format:
     {
         "timestamps": {"camera_name": float},
         "images": {"camera_name": "<base64-jpeg>"}
@@ -24,14 +24,15 @@ following format:
 """
 
 import base64
-import json
+import orjson as json
 import logging
 import time
-from threading import Event, Lock, Thread
+from threading import Condition, Event, Lock, Thread
 from typing import Any
 
 import cv2
 import numpy as np
+import zmq
 from numpy.typing import NDArray
 
 from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
@@ -41,6 +42,122 @@ from ..configs import ColorMode
 from .configuration_zmq import ZMQCameraConfig
 
 logger = logging.getLogger(__name__)
+
+
+_STREAMS_LOCK = Lock()
+_STREAMS: dict[tuple[str, int], "_SharedZMQStream"] = {}
+
+
+def _decode_zmq_images(parts: list[bytes]) -> dict[str, NDArray[Any]]:
+    """Decode all images from one ZMQ message so RGB/depth share the same packet."""
+    data = json.loads(parts[0])
+    if "images" not in data:
+        raise RuntimeError("invalid message: missing 'images' key")
+
+    frames = {}
+    protocol = data.get("protocol")
+    for name, image_payload in data["images"].items():
+        if protocol == "zmq.raw.v1":
+            part_index = image_payload["part"]
+            if part_index >= len(parts):
+                raise RuntimeError(f"invalid raw message: missing image part {part_index}")
+            frame = np.frombuffer(parts[part_index], dtype=np.dtype(image_payload["dtype"]))
+            frames[name] = frame.reshape(image_payload["shape"]).copy()
+            continue
+
+        if protocol == "zmq.compressed.v1":
+            part_index = image_payload["part"]
+            if part_index >= len(parts):
+                raise RuntimeError(f"invalid compressed message: missing image part {part_index}")
+            flags = cv2.IMREAD_UNCHANGED if image_payload.get("encoding") == "png" else cv2.IMREAD_COLOR
+            frame = cv2.imdecode(np.frombuffer(parts[part_index], np.uint8), flags)
+            if frame is None:
+                raise RuntimeError(f"failed to decode image '{name}'")
+            frames[name] = frame
+            continue
+
+        img_bytes = base64.b64decode(image_payload)
+        frame = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
+        if frame is None:
+            raise RuntimeError(f"failed to decode image '{name}'")
+        frames[name] = frame
+
+    return frames
+
+
+class _SharedZMQStream:
+    def __init__(self, server_address: str, port: int, timeout_ms: int):
+        self.server_address = server_address
+        self.port = port
+        self.timeout_ms = timeout_ms
+        self.context: zmq.Context | None = None
+        self.socket: zmq.Socket | None = None
+        self.thread: Thread | None = None
+        self.stop_event = Event()
+        self.condition = Condition()
+        self.latest_frames: dict[str, NDArray[Any]] = {}
+        self.version = 0
+        self.refcount = 0
+
+    def start(self) -> None:
+        if self.thread and self.thread.is_alive():
+            return
+        self.context = zmq.Context()
+        self.socket = self.context.socket(zmq.SUB)
+        self.socket.setsockopt_string(zmq.SUBSCRIBE, "")
+        self.socket.setsockopt(zmq.RCVTIMEO, self.timeout_ms)
+        self.socket.setsockopt(zmq.RCVHWM, 1)
+        self.socket.connect(f"tcp://{self.server_address}:{self.port}")
+        self.thread = Thread(target=self._read_loop, daemon=True)
+        self.thread.start()
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        with self.condition:
+            self.condition.notify_all()
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=2.0)
+        if self.socket:
+            self.socket.close()
+            self.socket = None
+        if self.context:
+            self.context.term()
+            self.context = None
+        self.thread = None
+
+    def _read_loop(self) -> None:
+        while not self.stop_event.is_set():
+            try:
+                if self.socket is None:
+                    break
+                parts = self.socket.recv_multipart()
+                while True:
+                    try:
+                        parts = self.socket.recv_multipart(flags=zmq.NOBLOCK)
+                    except zmq.Again:
+                        break
+                frames = _decode_zmq_images(parts)
+                with self.condition:
+                    self.latest_frames = frames
+                    self.version += 1
+                    self.condition.notify_all()
+            except zmq.Again:
+                continue
+            except Exception as e:
+                if not self.stop_event.is_set():
+                    logger.warning(f"ZMQ stream read error: {e}")
+
+    def get_frame(self, camera_name: str, last_version: int, timeout_ms: float) -> tuple[NDArray[Any], int]:
+        deadline = time.monotonic() + timeout_ms / 1000.0
+        with self.condition:
+            while self.version <= last_version or camera_name not in self.latest_frames:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(
+                        f"ZMQ stream {self.server_address}:{self.port} timeout after {timeout_ms}ms"
+                    )
+                self.condition.wait(timeout=remaining)
+            return self.latest_frames[camera_name], self.version
 
 
 class ZMQCamera(Camera):
@@ -59,7 +176,6 @@ class ZMQCamera(Camera):
 
     def __init__(self, config: ZMQCameraConfig):
         super().__init__(config)
-        import zmq
 
         self.config = config
         self.server_address = config.server_address
@@ -68,22 +184,16 @@ class ZMQCamera(Camera):
         self.color_mode = config.color_mode
         self.timeout_ms = config.timeout_ms
 
-        self.context: zmq.Context | None = None
-        self.socket: zmq.Socket | None = None
+        self.stream: _SharedZMQStream | None = None
         self._connected = False
-
-        self.thread: Thread | None = None
-        self.stop_event: Event | None = None
-        self.frame_lock: Lock = Lock()
-        self.latest_frame: NDArray[Any] | None = None
-        self.new_frame_event: Event = Event()
+        self._last_version = 0
 
     def __str__(self) -> str:
         return f"ZMQCamera({self.camera_name}@{self.server_address}:{self.port})"
 
     @property
     def is_connected(self) -> bool:
-        return self._connected and self.context is not None and self.socket is not None
+        return self._connected and self.stream is not None
 
     def connect(self, warmup: bool = True) -> None:
         """Connect to ZMQ camera server."""
@@ -93,14 +203,15 @@ class ZMQCamera(Camera):
         logger.info(f"Connecting to {self}...")
 
         try:
-            import zmq
-
-            self.context = zmq.Context()
-            self.socket = self.context.socket(zmq.SUB)
-            self.socket.setsockopt_string(zmq.SUBSCRIBE, "")
-            self.socket.setsockopt(zmq.RCVTIMEO, self.timeout_ms)
-            self.socket.setsockopt(zmq.CONFLATE, True)
-            self.socket.connect(f"tcp://{self.server_address}:{self.port}")
+            key = (self.server_address, self.port)
+            with _STREAMS_LOCK:
+                stream = _STREAMS.get(key)
+                if stream is None:
+                    stream = _SharedZMQStream(self.server_address, self.port, self.timeout_ms)
+                    _STREAMS[key] = stream
+                stream.refcount += 1
+                stream.start()
+            self.stream = stream
             self._connected = True
 
             # Auto-detect resolution
@@ -122,12 +233,14 @@ class ZMQCamera(Camera):
     def _cleanup(self):
         """Clean up ZMQ resources."""
         self._connected = False
-        if self.socket:
-            self.socket.close()
-            self.socket = None
-        if self.context:
-            self.context.term()
-            self.context = None
+        if self.stream is not None:
+            key = (self.server_address, self.port)
+            with _STREAMS_LOCK:
+                self.stream.refcount -= 1
+                if self.stream.refcount <= 0:
+                    self.stream.stop()
+                    _STREAMS.pop(key, None)
+            self.stream = None
 
     @staticmethod
     def find_cameras() -> list[dict[str, Any]]:
@@ -141,95 +254,34 @@ class ZMQCamera(Camera):
         Returns:
             np.ndarray: Decoded frame (height, width, 3)
         """
-        if not self.is_connected or self.socket is None:
+        if not self.is_connected or self.stream is None:
             raise DeviceNotConnectedError(f"{self} is not connected.")
-
-        try:
-            message = self.socket.recv_string()
-        except Exception as e:
-            if type(e).__name__ == "Again":
-                raise TimeoutError(f"{self} timeout after {self.timeout_ms}ms") from e
-            raise
-
-        # Decode JSON message
-        data = json.loads(message)
-
-        if "images" not in data:
-            raise RuntimeError(f"{self} invalid message: missing 'images' key")
-
-        images = data["images"]
-
-        # Get image by camera name or first available
-        if self.camera_name in images:
-            img_b64 = images[self.camera_name]
-        elif images:
-            img_b64 = next(iter(images.values()))
-        else:
-            raise RuntimeError(f"{self} no images in message")
-
-        # Decode base64 JPEG
-        img_bytes = base64.b64decode(img_b64)
-        frame = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
-
-        if frame is None:
-            raise RuntimeError(f"{self} failed to decode image")
-
+        frame, self._last_version = self.stream.get_frame(self.camera_name, self._last_version, self.timeout_ms)
         return frame
 
     def _read_loop(self) -> None:
-        while self.stop_event and not self.stop_event.is_set():
-            try:
-                frame = self.read()
-                with self.frame_lock:
-                    self.latest_frame = frame
-                self.new_frame_event.set()
-            except DeviceNotConnectedError:
-                break
-            except TimeoutError:
-                pass
-            except Exception as e:
-                logger.warning(f"Read error: {e}")
+        return
 
     def _start_read_thread(self) -> None:
-        if self.thread and self.thread.is_alive():
-            return
-        self.stop_event = Event()
-        self.thread = Thread(target=self._read_loop, daemon=True)
-        self.thread.start()
+        return
 
     def _stop_read_thread(self) -> None:
-        if self.stop_event:
-            self.stop_event.set()
-        if self.thread and self.thread.is_alive():
-            self.thread.join(timeout=2.0)
-        self.thread = None
-        self.stop_event = None
+        return
 
     def async_read(self, timeout_ms: float = 10000) -> NDArray[Any]:
         """Read latest frame asynchronously (non-blocking)."""
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
 
-        if not self.thread or not self.thread.is_alive():
-            self._start_read_thread()
-
-        if not self.new_frame_event.wait(timeout=timeout_ms / 1000.0):
-            raise TimeoutError(f"{self} async_read timeout after {timeout_ms}ms")
-
-        with self.frame_lock:
-            frame = self.latest_frame
-            self.new_frame_event.clear()
-
-        if frame is None:
-            raise RuntimeError(f"{self} no frame available")
-
+        if self.stream is None:
+            raise DeviceNotConnectedError(f"{self} is not connected.")
+        frame, self._last_version = self.stream.get_frame(self.camera_name, self._last_version, timeout_ms)
         return frame
 
     def disconnect(self) -> None:
         """Disconnect from ZMQ camera."""
-        if not self.is_connected and not self.thread:
+        if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} not connected.")
 
-        self._stop_read_thread()
         self._cleanup()
         logger.info(f"{self} disconnected.")
