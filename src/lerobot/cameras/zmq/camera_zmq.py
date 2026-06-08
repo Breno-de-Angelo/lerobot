@@ -257,6 +257,8 @@ class ZMQCamera(Camera):
         if not self.is_connected or self.stream is None:
             raise DeviceNotConnectedError(f"{self} is not connected.")
         frame, self._last_version = self.stream.get_frame(self.camera_name, self._last_version, self.timeout_ms)
+        if frame.ndim == 2 and self.camera_name.endswith("depth"):
+            frame = frame[:, :, None]
         return frame
 
     def _read_loop(self) -> None:
@@ -276,6 +278,8 @@ class ZMQCamera(Camera):
         if self.stream is None:
             raise DeviceNotConnectedError(f"{self} is not connected.")
         frame, self._last_version = self.stream.get_frame(self.camera_name, self._last_version, timeout_ms)
+        if frame.ndim == 2 and self.camera_name.endswith("depth"):
+            frame = frame[:, :, None]
         return frame
 
     def disconnect(self) -> None:
