@@ -31,11 +31,36 @@ logger = logging.getLogger(__name__)
 
 # Asset paths - check G1_ASSETS_DIR env var first, then fall back to local assets
 # This allows assets to live in prometheus-vla while lerobot remains asset-free
-_ENV_ASSETS_DIR = os.environ.get("G1_ASSETS_DIR")
-if _ENV_ASSETS_DIR:
-    ASSETS_DIR = Path(_ENV_ASSETS_DIR)
-else:
-    ASSETS_DIR = Path(__file__).parent.parent / "assets"
+#
+# O fallback antigo era `Path(__file__).parent.parent / "assets"`, um caminho que na
+# maioria das cópias deste arquivo simplesmente NÃO existe — e ninguém exporta
+# G1_ASSETS_DIR. O sintoma era um `ValueError: URDF dir ... not exists` vindo de dentro
+# do dex_retargeting, apontando para um diretório que nunca esteve lá.
+#
+# Agora, sem a variável, sobe-se a árvore procurando um `assets/` que de fato tenha o
+# .yml da mão. Isso também elimina a dependência do cwd para ESTA cópia (a via em uso,
+# `teleop/robot_control/hand_retargeting.py`, continua resolvendo por cwd — ver
+# docs/INSTALL.md §5.1).
+_ARQ_SONDA = Path("unitree_hand") / "unitree_dex3.yml"
+
+
+def _descobrir_assets_dir() -> Path:
+    forcado = os.environ.get("G1_ASSETS_DIR")
+    if forcado:
+        return Path(forcado)
+
+    aqui = Path(__file__).resolve()
+    for pasta in [aqui.parent, *aqui.parents]:
+        candidato = pasta / "assets"
+        if (candidato / _ARQ_SONDA).is_file():
+            return candidato
+
+    # Nada encontrado: devolve o caminho histórico para o erro sair no ponto de uso,
+    # com o nome do arquivo que faltou, em vez de estourar no import.
+    return aqui.parent.parent / "assets"
+
+
+ASSETS_DIR = _descobrir_assets_dir()
 
 
 class HandType(Enum):
