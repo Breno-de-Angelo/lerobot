@@ -14,8 +14,14 @@ from typing import Optional, Tuple
 import numpy as np
 import yaml
 
+# Importar do submódulo, não do topo do pacote: o dex_retargeting 0.5.0 parou de
+# re-exportar RetargetingConfig em `dex_retargeting/__init__.py` (o env antigo `g1`
+# tinha a 0.4.7, onde funcionava). Como este import está num try, a quebra era
+# silenciosa: HAS_DEX_RETARGETING virava False e o retargeting dos dedos sumia.
+# `dex_retargeting.retargeting_config` existe nas duas versões — o resto da API
+# (set_default_urdf_dir / from_dict / build / retarget) não mudou.
 try:
-    from dex_retargeting import RetargetingConfig
+    from dex_retargeting.retargeting_config import RetargetingConfig
     HAS_DEX_RETARGETING = True
 except ImportError:
     HAS_DEX_RETARGETING = False

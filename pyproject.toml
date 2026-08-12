@@ -214,8 +214,27 @@ unitree_g1_dex3 = [
 ]
 # Teleop VR do G1: IK dos braços (pinocchio + casadi) e retargeting das mãos.
 # Usado por robots/unitree_g1/robot_control/{g1_arm_ik,hand_retargeting}.py
+#
+# pin e casadi são declarados explicitamente porque g1_arm_ik.py faz
+#   import casadi / import pinocchio as pin / from pinocchio import casadi as cpin
+# O fork listava só dex-retargeting e dependia de o pinocchio vir transitivamente,
+# com o casadi instalado à mão no ambiente (o env antigo `g1` tinha casadi 3.6.7 e
+# pin 2.7.0 fora do pyproject). Sem esta declaração, `pip install` monta um ambiente
+# que importa lerobot mas quebra no primeiro uso do IK.
+# NOTA: `from pinocchio import casadi as cpin` exige um build do pinocchio COM suporte
+# a casadi — é o caso dos wheels `pin` do PyPI.
+#
+# `dex-retargeting` NÃO é declarado aqui, de propósito. A única versão do PyPI que
+# instala em Python 3.12 e não é a 0.5.0 seria a 0.4.5/0.4.6, e a 0.5.0 quebra duas
+# vezes: parou de re-exportar RetargetingConfig no topo do pacote e fundiu os três
+# campos `target_link_human_indices_{dexpilot,position,vector}` num só — os nossos
+# .yml de mão (assets/unitree_hand/unitree_dex3.yml) são do formato antigo.
+# A versão que funciona é a 0.4.7, fork vendorizado no repo e inexistente no PyPI:
+#   pip install -e ./lerobot-ext/teleop/robot_control/dex-retargeting
+# Mesma política do unitree-sdk2 e do televuer logo acima.
 unitree_g1_vr_teleop = [
-    "dex-retargeting>=0.1.0",
+    "pin>=3.3.0",
+    "casadi>=3.6.0",
 ]
 # ATENÇÃO: este extra NÃO instala o pacote `televuer` — ele só puxa o vuer.
 # O televuer é NOSSO FORK e entra editable, à parte:
