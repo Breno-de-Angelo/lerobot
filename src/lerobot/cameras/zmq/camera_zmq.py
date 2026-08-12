@@ -47,6 +47,10 @@ logger = logging.getLogger(__name__)
 _STREAMS_LOCK = Lock()
 _STREAMS: dict[tuple[str, int], "_SharedZMQStream"] = {}
 
+# De quanto em quanto tempo a thread de leitura acorda para checar o `stop_event`.
+# Só afeta a latência do encerramento, não a espera por quadros (ver `_SharedZMQStream.start`).
+_POLL_STOP_MS = 200
+
 
 def _decode_zmq_images(parts: list[bytes]) -> dict[str, NDArray[Any]]:
     """Decode all images from one ZMQ message so RGB/depth share the same packet."""
@@ -105,18 +109,49 @@ class _SharedZMQStream:
         self.context = zmq.Context()
         self.socket = self.context.socket(zmq.SUB)
         self.socket.setsockopt_string(zmq.SUBSCRIBE, "")
-        self.socket.setsockopt(zmq.RCVTIMEO, self.timeout_ms)
+        # RCVTIMEO curto de propósito, e NÃO `self.timeout_ms`: aqui ele só decide de
+        # quanto em quanto tempo o laço de leitura acorda para olhar o `stop_event`.
+        # Quem define a espera por um quadro é `get_frame`, com deadline próprio sobre a
+        # Condition — o socket ficar mudo por mais tempo não muda nada para o chamador.
+        # Com o valor de configuração (até 10 s no dex3), o `stop()` desistia do join e
+        # fechava o socket com esta thread ainda dentro do `recv_multipart`, o que
+        # derruba o processo inteiro (ver `stop`).
+        self.socket.setsockopt(zmq.RCVTIMEO, min(self.timeout_ms, _POLL_STOP_MS))
         self.socket.setsockopt(zmq.RCVHWM, 1)
         self.socket.connect(f"tcp://{self.server_address}:{self.port}")
         self.thread = Thread(target=self._read_loop, daemon=True)
         self.thread.start()
 
     def stop(self) -> None:
+        """Encerra o laço de leitura e só então libera socket e contexto.
+
+        Sockets do zmq não são thread-safe: fechar um socket enquanto OUTRA thread está
+        dentro de `recv_multipart` não é corrida benigna — a libzmq aborta o processo
+        (`Fatal Python error: Aborted`, core dump). Era o que acontecia quando o
+        servidor de imagem ficava mudo: a thread de leitura ficava presa no recv até o
+        RCVTIMEO, o `join(timeout=2.0)` desistia antes disso e o `close()` vinha por
+        cima. Numa sessão de teleoperação isso aparece como crash ao desligar, logo
+        depois de a câmera cair — a hora em que menos se quer um core dump.
+
+        Agora o join espera de verdade e, se ainda assim a thread não morrer, o socket
+        NÃO é fechado: vazar um socket até o fim do processo é barato; abortar não.
+        """
         self.stop_event.set()
         with self.condition:
             self.condition.notify_all()
+
         if self.thread and self.thread.is_alive():
-            self.thread.join(timeout=2.0)
+            # Folga sobre o RCVTIMEO do laço, que é o pior caso de espera lá dentro.
+            self.thread.join(timeout=(_POLL_STOP_MS / 1000.0) + 2.0)
+            if self.thread.is_alive():
+                logger.warning(
+                    f"ZMQ stream {self.server_address}:{self.port}: thread de leitura não "
+                    f"encerrou; socket e contexto ficam abertos de propósito, para não "
+                    f"abortar o processo."
+                )
+                self.thread = None
+                return
+
         if self.socket:
             self.socket.close()
             self.socket = None
