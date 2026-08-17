@@ -76,10 +76,19 @@ def make_robot_from_config(config: RobotConfig) -> Robot:
         from .bi_rebot_b601_follower import BiRebotB601Follower
 
         return BiRebotB601Follower(config)
-    elif config.type == "unitree_g1_dex3":
-        from .unitree_g1.unitree_g1_dex3 import UnitreeG1Dex3
-
-        return UnitreeG1Dex3(config)
+    # "unitree_g1_dex3" NÃO é despachado aqui de propósito — cai no `else`, que resolve a
+    # classe do robô a partir do módulo do próprio config.
+    #
+    # O `UnitreeG1Dex3Config` deste pacote não tem `register_subclass`, então nenhum YAML
+    # consegue nomeá-lo: quem registra "unitree_g1_dex3" é o
+    # `lerobot-ext/robot/unitree_g1/unitree_g1_dex3.py`. Com o elif no lugar, o config do
+    # lerobot-ext era instanciado com a classe DAQUI, e a primeira divergência entre as
+    # duas estourava — `AttributeError: 'UnitreeG1Dex3Config' object has no attribute
+    # 'gravity_compensation'`, campo que só existe na versão deste pacote.
+    #
+    # Pelo `else`, cada config instancia o robô do seu próprio módulo, e as duas
+    # implementações convivem. Uso direto por código (`UnitreeG1Dex3(cfg)`) não passa por
+    # aqui e segue igual.
     elif config.type == "mock_unitree_g1_dex3":
         from .unitree_g1.mock_unitree_g1_dex3 import MockUnitreeG1Dex3
 
