@@ -61,18 +61,24 @@ def _decode_zmq_images(parts: list[bytes]) -> dict[str, NDArray[Any]]:
     frames = {}
     protocol = data.get("protocol")
     for name, image_payload in data["images"].items():
-        if protocol == "zmq.raw.v1":
+        # O despacho é POR IMAGEM, não pelo `protocol` da mensagem inteira: o
+        # servidor de cabeça manda RGB em base64 (JPEG, dentro do JSON) e
+        # profundidade em quadro binário na mesma mensagem. Ler o protocolo só do
+        # cabeçalho obrigaria as duas a usarem o mesmo transporte, e aí ou a
+        # profundidade perderia os 16 bits ou a teleoperação — que fala o formato
+        # antigo pelo `sensor_utils.py` — pararia de entender o RGB.
+        if isinstance(image_payload, dict):
             part_index = image_payload["part"]
             if part_index >= len(parts):
-                raise RuntimeError(f"invalid raw message: missing image part {part_index}")
-            frame = np.frombuffer(parts[part_index], dtype=np.dtype(image_payload["dtype"]))
-            frames[name] = frame.reshape(image_payload["shape"]).copy()
-            continue
+                raise RuntimeError(f"invalid message: missing image part {part_index} for '{name}'")
 
-        if protocol == "zmq.compressed.v1":
-            part_index = image_payload["part"]
-            if part_index >= len(parts):
-                raise RuntimeError(f"invalid compressed message: missing image part {part_index}")
+            if "dtype" in image_payload or protocol == "zmq.raw.v1":
+                frame = np.frombuffer(parts[part_index], dtype=np.dtype(image_payload["dtype"]))
+                frames[name] = frame.reshape(image_payload["shape"]).copy()
+                continue
+
+            # IMREAD_UNCHANGED preserva os 16 bits e o canal único da profundidade;
+            # IMREAD_COLOR os destruiria, virando 8 bits em 3 canais.
             flags = cv2.IMREAD_UNCHANGED if image_payload.get("encoding") == "png" else cv2.IMREAD_COLOR
             frame = cv2.imdecode(np.frombuffer(parts[part_index], np.uint8), flags)
             if frame is None:
